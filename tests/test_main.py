@@ -184,6 +184,7 @@ class Options(object):
         self.include_host = []
         self.exclude_older_than = None
         self.exclude_newer_than = None
+        self.initial_timestamp = None
         self.track_http_method = True
         self.seconds_to_add_to_date = 0
         self.request_suffix = None

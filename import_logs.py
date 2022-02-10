@@ -901,6 +901,12 @@ class Configuration:
             help="Ignore logs newer than the specified date. Exclusive. Date format must be YYYY-MM-DD hh:mm:ss +/-0000. The timezone offset is required."
         )
         parser.add_argument(
+            '--timestamp-file', type=str, default=None,
+            help="Ignore logs up to the date written in the timestamp file (inclusive), if the file exists. After completing the import, "
+                 "save the time of the newest log entry back to the same file. Date format must be YYYY-MM-DD hh:mm:ss +/-0000, timezone "
+                 "offset is required."
+        )
+        parser.add_argument(
             '--add-to-date', dest='seconds_to_add_to_date', default=0, type=int,
             help="A number of seconds to add to each date value in the log file."
         )
@@ -1032,6 +1038,12 @@ class Configuration:
 
         if self.options.regex_groups_to_ignore:
             self.options.regex_groups_to_ignore = set(self.options.regex_groups_to_ignore.split(','))
+
+        self.options.initial_timestamp = None
+        if self.options.timestamp_file is not None and os.path.exists(self.options.timestamp_file):
+            date_string = open(self.options.timestamp_file).readline().strip()
+            self.options.initial_timestamp = self._valid_date(date_string)
+
 
     def __init__(self, argv = None):
         self._parse_args(self._create_parser(), argv)
@@ -1172,6 +1184,7 @@ class Statistics:
     def __init__(self):
         self.time_start = None
         self.time_stop = None
+        self.latest_timestamp = None
 
         self.matomo_sites = set()                # sites ID
         self.matomo_sites_created = []           # (hostname, site ID)
@@ -1252,7 +1265,20 @@ The following lines were not tracked by Matomo, either due to a malformed tracke
 
 ''' % textwrap.fill(", ".join(self.invalid_lines), 80)
 
-        print(('''
+        date_filtering_info = ''
+        if config.options.timestamp_file:
+            if config.options.initial_timestamp:
+                date_filtering_info += '    Processed logs since: %s +0000\n' % config.options.initial_timestamp
+            if stats.latest_timestamp:
+                date_filtering_info += '    Saved last timestamp: %s +0000\n' % stats.latest_timestamp
+            else:
+                date_filtering_info += '    Saved last timestamp: n/a\n'
+        if config.options.exclude_older_than:
+            date_filtering_info += '    Excluded logs before: %s +0000\n' % config.options.exclude_older_than
+        if config.options.exclude_newer_than:
+            date_filtering_info += '    Excluded logs after: %s +0000\n' % config.options.exclude_newer_than
+
+        print(re.sub(r'\n\n\n+', '\n\n', '''
 %(invalid_lines)sLogs import summary
 -------------------
 
@@ -1268,6 +1294,8 @@ The following lines were not tracked by Matomo, either due to a malformed tracke
         %(count_lines_skipped_user_agent)d requests done by bots, search engines...
         %(count_lines_static)d requests to static resources (css, js, images, ico, ttf...)
         %(count_lines_skipped_downloads)d requests to file downloads did not match any --download-extensions
+
+%(date_filtering_info)s
 
 Website import summary
 ----------------------
@@ -1345,7 +1373,8 @@ Processing your log data
             self.time_start, self.time_stop,
         )),
     'url': config.options.matomo_api_url,
-    'invalid_lines': invalid_lines_summary
+    'invalid_lines': invalid_lines_summary,
+    'date_filtering_info': date_filtering_info,
 }))
 
     ##
@@ -1373,6 +1402,11 @@ Processing your log data
 
     def stop_monitor(self):
         self.monitor_stop = True
+
+    def save_timestamp(self):
+        if config.options.timestamp_file and stats.latest_timestamp:
+            with open(config.options.timestamp_file, 'w') as file:
+                file.write(stats.latest_timestamp.strftime('%Y-%m-%d %H:%M:%S +0000'))
 
 class TimeHelper:
 
@@ -2339,6 +2373,9 @@ class Parser:
         if config.options.exclude_newer_than and hit.date > config.options.exclude_newer_than:
             return (True, 'date is newer than --exclude-newer-than')
 
+        if config.options.initial_timestamp and hit.date <= config.options.initial_timestamp:
+            return (True, 'date is older or equal to initial timestamp')
+
         return (False, None)
 
     def parse(self, filename):
@@ -2605,6 +2642,8 @@ class Parser:
 
             hits.append(hit)
 
+            stats.latest_timestamp = max([stats.latest_timestamp or datetime.datetime.min, hit.date])
+
             if len(hits) >= config.options.recorder_max_payload_size * len(Recorder.recorders):
                 Recorder.add_hits(hits)
                 hits = []
@@ -2662,6 +2701,7 @@ def main():
     if config.options.show_progress:
         stats.stop_monitor()
 
+    stats.save_timestamp()
     stats.print_summary()
 
 def fatal_error(error, filename=None, lineno=None):
